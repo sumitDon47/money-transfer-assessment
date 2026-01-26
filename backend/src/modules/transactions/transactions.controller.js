@@ -1,27 +1,37 @@
 import sql from "mssql";
 import { getPool } from "../../config/db.js";
+import { publishTransactionCreated } from "./transactions.producer.js";
+import { v4 as uuidv4 } from "uuid";
 
-function calcFee(amount) {
-  // Simple fee rule (you can adjust anytime)
-  // Example: 2% fee, minimum 50, maximum 2000
-  const fee = amount * 0.02;
-  return Math.min(Math.max(fee, 50), 2000);
+
+const FOREX_RATE = 0.92; // 1 JPY = 0.92 NPR
+
+function calcFeeNPR(amountNPR) {
+  if (amountNPR <= 100000) return 500;
+  if (amountNPR <= 200000) return 1000;
+  return 3000;
 }
 
 export async function createTransaction(req, res) {
+  
+  const eventId = uuidv4();
+  
   const userId = req.user?.userId;
   if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
-  const { senderId, receiverId, amount, currencyFrom, currencyTo, note } = req.body;
+  const { senderId, receiverId, amountJPY, note } = req.body;
 
-  const pool = await getPool();
-  const tx = new sql.Transaction(pool);
+  // validate amountJPY
+  const jpy = Number(amountJPY);
+  if (!Number.isFinite(jpy) || jpy <= 0) {
+    return res.status(400).json({ message: "amountJPY must be a valid number > 0" });
+  }
 
   try {
-    await tx.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
+    const pool = await getPool();
 
-    // 1) Verify sender belongs to this user and is active
-    const senderResult = await new sql.Request(tx)
+    // 1) Verify sender belongs to user and is active
+    const senderResult = await pool.request()
       .input("senderId", sql.Int, senderId)
       .input("userId", sql.Int, userId)
       .query(`
@@ -33,12 +43,11 @@ export async function createTransaction(req, res) {
       `);
 
     if (senderResult.recordset.length === 0) {
-      await tx.rollback();
       return res.status(404).json({ message: "Sender not found" });
     }
 
-    // 2) Verify receiver belongs to this user and is active
-    const receiverResult = await new sql.Request(tx)
+    // 2) Verify receiver belongs to user and is active
+    const receiverResult = await pool.request()
       .input("receiverId", sql.Int, receiverId)
       .input("userId", sql.Int, userId)
       .query(`
@@ -50,43 +59,56 @@ export async function createTransaction(req, res) {
       `);
 
     if (receiverResult.recordset.length === 0) {
-      await tx.rollback();
       return res.status(404).json({ message: "Receiver not found" });
     }
 
-    // 3) Fee + totals
-    const fee = Number(calcFee(Number(amount)).toFixed(2));
-    const totalAmount = Number((Number(amount) + fee).toFixed(2));
+    // 3) Compute NPR + fee tiers
+    const amountNPR = Number((jpy * FOREX_RATE).toFixed(2));
+    const feeNPR = calcFeeNPR(amountNPR);
+    const totalNPR = Number((amountNPR + feeNPR).toFixed(2));
 
-    // 4) Insert transaction
-    const insertResult = await new sql.Request(tx)
-      .input("createdByUserId", sql.Int, userId)
-      .input("senderId", sql.Int, senderId)
-      .input("receiverId", sql.Int, receiverId)
-      .input("amount", sql.Decimal(18, 2), Number(amount))
-      .input("fee", sql.Decimal(18, 2), fee)
-      .input("totalAmount", sql.Decimal(18, 2), totalAmount)
-      .input("currencyFrom", sql.NVarChar(10), (currencyFrom || "JPY").trim())
-      .input("currencyTo", sql.NVarChar(10), (currencyTo || "NPR").trim())
-      .input("note", sql.NVarChar(255), note ? String(note).trim() : null)
-      .query(`
-        INSERT INTO Transactions
-          (createdByUserId, senderId, receiverId, amount, fee, totalAmount, currencyFrom, currencyTo, status, note)
-        OUTPUT INSERTED.*
-        VALUES
-          (@createdByUserId, @senderId, @receiverId, @amount, @fee, @totalAmount, @currencyFrom, @currencyTo, 'PENDING', @note)
-      `);
+    // 4) Produce Kafka event (consumer will insert into DB)
+    await publishTransactionCreated({
+      createdByUserId: userId,
+      senderId,
+      receiverId,
 
-    const created = insertResult.recordset[0];
+      // old required DB columns (consumer will use these)
+      amount: jpy,
+      fee: 0,
+      totalAmount: jpy,
+      currencyFrom: "JPY",
+      currencyTo: "NPR",
 
-    await tx.commit();
-    return res.status(201).json(created);
+      // Day 6 columns
+      amountJPY: jpy,
+      forexRate: FOREX_RATE,
+      amountNPR,
+      feeNPR,
+      totalNPR,
+
+      status: "PENDING",
+      note: note ? String(note).trim() : null,
+      createdAt: new Date().toISOString(),
+    });
+
+    // ✅ API returns queued (not inserted yet)
+    return res.status(202).json({
+      message: "Queued",
+      status: "PENDING",
+      amountJPY: jpy,
+      amountNPR,
+      feeNPR,
+      totalNPR,
+      forexRate: FOREX_RATE,
+    });
   } catch (err) {
-    try { await tx.rollback(); } catch {}
     console.error("createTransaction error:", err);
     return res.status(500).json({ message: "Internal server error" });
   }
 }
+
+
 
 export async function listTransactions(req, res) {
   try {
@@ -96,48 +118,72 @@ export async function listTransactions(req, res) {
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || "10", 10), 1), 50);
     const offset = (page - 1) * limit;
+
     const status = req.query.status ? String(req.query.status).trim() : null;
+    const from = req.query.from ? String(req.query.from).trim() : null;
+    const to = req.query.to ? String(req.query.to).trim() : null;
+    const senderId = req.query.senderId ? Number(req.query.senderId) : null;
+    const receiverId = req.query.receiverId ? Number(req.query.receiverId) : null;
 
     const pool = await getPool();
 
     const statusFilter = status ? "AND t.status = @status" : "";
+    const dateFilter = from && to ? "AND t.createdAt >= @from AND t.createdAt < DATEADD(day, 1, @to)" : "";
+    const senderFilter = senderId ? "AND t.senderId = @senderId" : "";
+    const receiverFilter = receiverId ? "AND t.receiverId = @receiverId" : "";
 
+    const filters = `
+      ${statusFilter}
+      ${dateFilter}
+      ${senderFilter}
+      ${receiverFilter}
+    `;
+
+    // Count query
     const countResult = await pool.request()
       .input("userId", sql.Int, userId)
       .input("status", sql.NVarChar(20), status)
+      .input("from", sql.Date, from)
+      .input("to", sql.Date, to)
+      .input("senderId", sql.Int, senderId)
+      .input("receiverId", sql.Int, receiverId)
       .query(`
         SELECT COUNT(*) AS total
         FROM Transactions t
         WHERE t.isActive = 1
           AND t.createdByUserId = @userId
-          ${statusFilter}
+          ${filters}
       `);
 
     const total = countResult.recordset[0].total;
 
+    // Data query
     const dataResult = await pool.request()
-  .input("userId", sql.Int, userId)
-  .input("status", sql.NVarChar(20), status)
-  .input("offset", sql.Int, offset)
-  .input("limit", sql.Int, limit)
-  .query(`
-    SELECT
-      t.*,
-      s.fullName AS senderName,
-      s.phone AS senderPhone,
-      r.fullName AS receiverName,
-      r.phone AS receiverPhone
-    FROM Transactions t
-    JOIN Senders s ON s.id = t.senderId
-    JOIN Receivers r ON r.id = t.receiverId
-    WHERE t.isActive = 1
-      AND t.createdByUserId = @userId
-      ${statusFilter}
-    ORDER BY t.createdAt DESC
-    OFFSET @offset ROWS
-    FETCH NEXT @limit ROWS ONLY
-  `);
-
+      .input("userId", sql.Int, userId)
+      .input("status", sql.NVarChar(20), status)
+      .input("from", sql.Date, from)
+      .input("to", sql.Date, to)
+      .input("senderId", sql.Int, senderId)
+      .input("receiverId", sql.Int, receiverId)
+      .input("offset", sql.Int, offset)
+      .input("limit", sql.Int, limit)
+      .query(`
+        SELECT
+          t.*,
+          s.fullName AS senderName,
+          s.phone AS senderPhone,
+          r.fullName AS receiverName,
+          r.phone AS receiverPhone
+        FROM Transactions t
+        JOIN Senders s ON s.id = t.senderId
+        JOIN Receivers r ON r.id = t.receiverId
+        WHERE t.isActive = 1
+          AND t.createdByUserId = @userId
+          ${filters}
+        ORDER BY t.createdAt DESC
+        OFFSET @offset ROWS
+        FETCH NEXT @limit ROWS ONLY
+      `);
 
     return res.json({ page, limit, total, data: dataResult.recordset });
   } catch (err) {
@@ -145,6 +191,7 @@ export async function listTransactions(req, res) {
     return res.status(500).json({ message: "Internal server error" });
   }
 }
+
 
 export async function getTransactionById(req, res) {
   try {
@@ -205,4 +252,3 @@ export async function updateTransactionStatus(req, res) {
     return res.status(500).json({ message: "Internal server error" });
   }
 }
-

@@ -2,11 +2,22 @@ import { z } from "zod";
 
 export const createTransactionSchema = z.object({
   body: z.object({
-    senderId: z.coerce.number().int().positive("senderId must be a positive integer"),
-    receiverId: z.coerce.number().int().positive("receiverId must be a positive integer"),
-    amount: z.coerce.number().positive("amount must be > 0").max(10000000, "amount too large"),
-    currencyFrom: z.string().trim().min(2).max(10).optional(),
-    currencyTo: z.string().trim().min(2).max(10).optional(),
+    senderId: z.coerce
+      .number()
+      .int()
+      .positive("senderId must be a positive integer"),
+
+    receiverId: z.coerce
+      .number()
+      .int()
+      .positive("receiverId must be a positive integer"),
+
+    // ✅ Day 6: amount is in JPY
+    amountJPY: z.coerce
+      .number()
+      .positive("amountJPY must be > 0")
+      .max(10000000, "amountJPY too large"),
+
     note: z.string().trim().max(255).optional().nullable(),
   }),
 });
@@ -22,6 +33,12 @@ export const listSchema = z.object({
     page: z.coerce.number().int().min(1).optional(),
     limit: z.coerce.number().int().min(1).max(50).optional(),
     status: z.enum(["PENDING", "SUCCESS", "FAILED"]).optional(),
+
+    // (optional but recommended for Day 6 reports)
+    from: z.string().trim().optional(),      // YYYY-MM-DD
+    to: z.string().trim().optional(),        // YYYY-MM-DD
+    senderId: z.coerce.number().int().positive().optional(),
+    receiverId: z.coerce.number().int().positive().optional(),
   }),
 });
 
@@ -33,4 +50,3 @@ export const updateStatusSchema = z.object({
     status: z.enum(["SUCCESS", "FAILED"]),
   }),
 });
-
