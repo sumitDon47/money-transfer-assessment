@@ -3,6 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import { getPool } from "./config/db.js";
+import { requireAuth } from "./middleware/auth.js";
 import authRoutes from "./modules/auth/auth.routes.js";
 
 
@@ -27,5 +28,9 @@ export function createApp() {
   });
 
   app.use("/auth", authRoutes);
+  app.get("/me", requireAuth, (req, res) => {
+  res.json({ user: req.user });
+  });
+
   return app;
 }
