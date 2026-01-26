@@ -9,6 +9,8 @@ import authRoutes from "./modules/auth/auth.routes.js";
 import sendersRoutes from "./modules/senders/senders.routes.js";
 import receiversRoutes from "./modules/receivers/receivers.routes.js";
 
+import transactionsRoutes from "./modules/transactions/transactions.routes.js";
+
 
 export function createApp() {
   const app = express();
@@ -37,6 +39,8 @@ export function createApp() {
 
   app.use("/senders", sendersRoutes);
   app.use("/receivers", receiversRoutes);
+  app.use("/transactions", transactionsRoutes);
+
 
   // Global error handler (last middleware)
   app.use((err, req, res, next) => {
