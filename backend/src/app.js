@@ -3,6 +3,8 @@ import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import { getPool } from "./config/db.js";
+import authRoutes from "./modules/auth/auth.routes.js";
+
 
 export function createApp() {
   const app = express();
@@ -24,5 +26,6 @@ export function createApp() {
     }
   });
 
+  app.use("/auth", authRoutes);
   return app;
 }
