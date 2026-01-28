@@ -12,7 +12,7 @@ export const createTransactionSchema = z.object({
       .int()
       .positive("receiverId must be a positive integer"),
 
-    // ✅ Day 6: amount is in JPY
+    //amount is in JPY
     amountJPY: z.coerce
       .number()
       .positive("amountJPY must be > 0")
@@ -28,17 +28,24 @@ export const idParamSchema = z.object({
   }),
 });
 
+const dateOrIso = z
+  .string()
+  .trim()
+  .refine((v) => !Number.isNaN(new Date(v).getTime()), "Invalid date");
+
 export const listSchema = z.object({
   query: z.object({
     page: z.coerce.number().int().min(1).optional(),
     limit: z.coerce.number().int().min(1).max(50).optional(),
     status: z.enum(["PENDING", "SUCCESS", "FAILED"]).optional(),
 
-    // (optional but recommended for Day 6 reports)
-    from: z.string().trim().optional(),      // YYYY-MM-DD
-    to: z.string().trim().optional(),        // YYYY-MM-DD
     senderId: z.coerce.number().int().positive().optional(),
     receiverId: z.coerce.number().int().positive().optional(),
+
+    from: dateOrIso.optional(), //accepts 2026-01-26 OR full ISO
+    to: dateOrIso.optional(),
+
+    q: z.string().trim().max(100).optional(),
   }),
 });
 

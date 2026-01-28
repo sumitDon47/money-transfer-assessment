@@ -2,21 +2,27 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import sql from "mssql";
 import { getPool } from "../../config/db.js";
-
-function generateOtp() {
-  return Math.floor(100000 + Math.random() * 900000).toString(); // 6 digits
-}
-
-function normalizeEmail(email) {
-  return String(email || "").trim().toLowerCase();
-}
+import { transporter, FROM } from "../../config/mailer.js";
 
 const OTP_EXPIRES_MIN = Number(process.env.OTP_EXPIRES_MIN || 5);
+
+function normalizeEmail(v) {
+  return String(v || "").trim().toLowerCase();
+}
+
+function generateOtp() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
 
 export async function requestOtp(req, res) {
   try {
     const email = normalizeEmail(req.body?.email);
     if (!email) return res.status(400).json({ message: "Email required" });
+    if (!isValidEmail(email)) return res.status(400).json({ message: "Invalid email" });
 
     const pool = await getPool();
 
@@ -30,7 +36,7 @@ export async function requestOtp(req, res) {
 
     // Create user if not exists
     if (!user) {
-      const fullName = email.includes("@") ? email.split("@")[0] : email;
+      const fullName = email.split("@")[0];
 
       const insert = await pool
         .request()
@@ -54,7 +60,6 @@ export async function requestOtp(req, res) {
     const otpHash = await bcrypt.hash(otp, 10);
     const expiresAt = new Date(Date.now() + OTP_EXPIRES_MIN * 60 * 1000);
 
-    // Store OTP (hashed)
     await pool
       .request()
       .input("userId", sql.Int, user.id)
@@ -65,13 +70,26 @@ export async function requestOtp(req, res) {
         VALUES (@userId, @otpHash, @expiresAt)
       `);
 
-    // For Day 2 testing (no email yet)
-    console.log("OTP (for testing):", otp);
+    // Send email
+    await transporter.sendMail({
+      from: FROM,
+      to: email,
+      subject: "Your OTP Code",
+      text: `Your OTP is ${otp}. It expires in ${OTP_EXPIRES_MIN} minutes.`,
+      html: `
+        <div style="font-family:Arial,sans-serif;">
+          <h2>Your OTP Code</h2>
+          <p>Your OTP is:</p>
+          <div style="font-size:28px;font-weight:bold;letter-spacing:2px;">${otp}</div>
+          <p>This code expires in <b>${OTP_EXPIRES_MIN} minutes</b>.</p>
+        </div>
+      `,
+    });
 
-    return res.json({ message: "OTP sent (check console for now)" });
+    return res.json({ message: "OTP sent to email" });
   } catch (err) {
     console.error("requestOtp error:", err);
-    return res.status(500).json({ message: err.message || "Internal server error" });
+    return res.status(500).json({ message: "Internal server error" });
   }
 }
 
@@ -86,7 +104,6 @@ export async function verifyOtp(req, res) {
 
     const pool = await getPool();
 
-    // Get latest OTP for that user
     const result = await pool
       .request()
       .input("email", sql.NVarChar(255), email)
@@ -123,7 +140,6 @@ export async function verifyOtp(req, res) {
     const match = await bcrypt.compare(otp, record.otpHash);
     if (!match) return res.status(400).json({ message: "Invalid OTP" });
 
-    // Mark OTP consumed (so it can't be reused)
     await pool
       .request()
       .input("otpId", sql.Int, record.otpId)

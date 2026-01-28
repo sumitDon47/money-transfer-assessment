@@ -5,6 +5,8 @@ import { v4 as uuidv4 } from "uuid";
 
 
 const FOREX_RATE = 0.92; // 1 JPY = 0.92 NPR
+const eventId = uuidv4();
+
 
 function calcFeeNPR(amountNPR) {
   if (amountNPR <= 100000) return 500;
@@ -69,6 +71,7 @@ export async function createTransaction(req, res) {
 
     // 4) Produce Kafka event (consumer will insert into DB)
     await publishTransactionCreated({
+      eventId,
       createdByUserId: userId,
       senderId,
       receiverId,
@@ -101,15 +104,13 @@ export async function createTransaction(req, res) {
       feeNPR,
       totalNPR,
       forexRate: FOREX_RATE,
+      eventId
     });
   } catch (err) {
     console.error("createTransaction error:", err);
     return res.status(500).json({ message: "Internal server error" });
   }
 }
-
-
-
 export async function listTransactions(req, res) {
   try {
     const userId = req.user?.userId;
@@ -120,70 +121,100 @@ export async function listTransactions(req, res) {
     const offset = (page - 1) * limit;
 
     const status = req.query.status ? String(req.query.status).trim() : null;
-    const from = req.query.from ? String(req.query.from).trim() : null;
-    const to = req.query.to ? String(req.query.to).trim() : null;
     const senderId = req.query.senderId ? Number(req.query.senderId) : null;
     const receiverId = req.query.receiverId ? Number(req.query.receiverId) : null;
+    const q = req.query.q ? String(req.query.q).trim() : null;
+
+    // Dates: support "YYYY-MM-DD" or ISO
+    const fromRaw = req.query.from ? String(req.query.from).trim() : null;
+    const toRaw = req.query.to ? String(req.query.to).trim() : null;
+
+    const from = fromRaw ? new Date(fromRaw) : null;
+    const to = toRaw ? new Date(toRaw) : null;
+
+    if (from && Number.isNaN(from.getTime())) {
+      return res.status(400).json({ message: "Invalid 'from' date" });
+    }
+    if (to && Number.isNaN(to.getTime())) {
+      return res.status(400).json({ message: "Invalid 'to' date" });
+    }
+
+    // Make "to" inclusive through end-of-day if user passed date-only (or any date)
+    // We do: createdAt < (to + 1 day)
+    const toExclusive = to ? new Date(to) : null;
+    if (toExclusive) {
+      toExclusive.setDate(toExclusive.getDate() + 1);
+    }
 
     const pool = await getPool();
 
-    const statusFilter = status ? "AND t.status = @status" : "";
-    const dateFilter = from && to ? "AND t.createdAt >= @from AND t.createdAt < DATEADD(day, 1, @to)" : "";
-    const senderFilter = senderId ? "AND t.senderId = @senderId" : "";
-    const receiverFilter = receiverId ? "AND t.receiverId = @receiverId" : "";
+    // Build WHERE safely
+    const where = [];
+    where.push("t.isActive = 1");
+    where.push("t.createdByUserId = @userId");
 
-    const filters = `
-      ${statusFilter}
-      ${dateFilter}
-      ${senderFilter}
-      ${receiverFilter}
-    `;
+    if (status) where.push("t.status = @status");
+    if (Number.isFinite(senderId) && senderId > 0) where.push("t.senderId = @senderId");
+    if (Number.isFinite(receiverId) && receiverId > 0) where.push("t.receiverId = @receiverId");
 
-    // Count query
-    const countResult = await pool.request()
+    if (from) where.push("t.createdAt >= @from");
+    if (toExclusive) where.push("t.createdAt < @toExclusive");
+
+    if (q) {
+      where.push(
+        "(s.fullName LIKE @q OR s.phone LIKE @q OR r.fullName LIKE @q OR r.phone LIKE @q)"
+      );
+    }
+
+    const whereSql = `WHERE ${where.join(" AND ")}`;
+
+    // Count
+    const countReq = pool.request()
       .input("userId", sql.Int, userId)
       .input("status", sql.NVarChar(20), status)
-      .input("from", sql.Date, from)
-      .input("to", sql.Date, to)
-      .input("senderId", sql.Int, senderId)
-      .input("receiverId", sql.Int, receiverId)
-      .query(`
-        SELECT COUNT(*) AS total
-        FROM Transactions t
-        WHERE t.isActive = 1
-          AND t.createdByUserId = @userId
-          ${filters}
-      `);
+      .input("senderId", sql.Int, Number.isFinite(senderId) ? senderId : null)
+      .input("receiverId", sql.Int, Number.isFinite(receiverId) ? receiverId : null)
+      .input("from", sql.DateTime2, from)
+      .input("toExclusive", sql.DateTime2, toExclusive)
+      .input("q", sql.NVarChar(120), q ? `%${q}%` : null);
 
-    const total = countResult.recordset[0].total;
+    const countResult = await countReq.query(`
+      SELECT COUNT(*) AS total
+      FROM Transactions t
+      JOIN Senders s ON s.id = t.senderId
+      JOIN Receivers r ON r.id = t.receiverId
+      ${whereSql}
+    `);
 
-    // Data query
-    const dataResult = await pool.request()
+    const total = countResult.recordset[0]?.total ?? 0;
+
+    // Data
+    const dataReq = pool.request()
       .input("userId", sql.Int, userId)
       .input("status", sql.NVarChar(20), status)
-      .input("from", sql.Date, from)
-      .input("to", sql.Date, to)
-      .input("senderId", sql.Int, senderId)
-      .input("receiverId", sql.Int, receiverId)
+      .input("senderId", sql.Int, Number.isFinite(senderId) ? senderId : null)
+      .input("receiverId", sql.Int, Number.isFinite(receiverId) ? receiverId : null)
+      .input("from", sql.DateTime2, from)
+      .input("toExclusive", sql.DateTime2, toExclusive)
+      .input("q", sql.NVarChar(120), q ? `%${q}%` : null)
       .input("offset", sql.Int, offset)
-      .input("limit", sql.Int, limit)
-      .query(`
-        SELECT
-          t.*,
-          s.fullName AS senderName,
-          s.phone AS senderPhone,
-          r.fullName AS receiverName,
-          r.phone AS receiverPhone
-        FROM Transactions t
-        JOIN Senders s ON s.id = t.senderId
-        JOIN Receivers r ON r.id = t.receiverId
-        WHERE t.isActive = 1
-          AND t.createdByUserId = @userId
-          ${filters}
-        ORDER BY t.createdAt DESC
-        OFFSET @offset ROWS
-        FETCH NEXT @limit ROWS ONLY
-      `);
+      .input("limit", sql.Int, limit);
+
+    const dataResult = await dataReq.query(`
+      SELECT
+        t.*,
+        s.fullName AS senderName,
+        s.phone AS senderPhone,
+        r.fullName AS receiverName,
+        r.phone AS receiverPhone
+      FROM Transactions t
+      JOIN Senders s ON s.id = t.senderId
+      JOIN Receivers r ON r.id = t.receiverId
+      ${whereSql}
+      ORDER BY t.createdAt DESC
+      OFFSET @offset ROWS
+      FETCH NEXT @limit ROWS ONLY
+    `);
 
     return res.json({ page, limit, total, data: dataResult.recordset });
   } catch (err) {
@@ -191,7 +222,6 @@ export async function listTransactions(req, res) {
     return res.status(500).json({ message: "Internal server error" });
   }
 }
-
 
 export async function getTransactionById(req, res) {
   try {

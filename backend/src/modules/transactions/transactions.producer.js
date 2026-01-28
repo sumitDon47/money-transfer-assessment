@@ -1,4 +1,23 @@
+import kafkajs from "kafkajs";
+import snappy from "snappy";
 import { kafka, TOPIC_TRANSACTIONS_CREATED } from "../../config/kafka.js";
+
+const { CompressionCodecs, CompressionTypes } = kafkajs;
+
+CompressionCodecs[CompressionTypes.Snappy] = () => ({
+  compress: async (encoder) =>
+    new Promise((resolve, reject) => {
+      snappy.compress(encoder.buffer, (err, out) =>
+        err ? reject(err) : resolve(out)
+      );
+    }),
+  decompress: async (buffer) =>
+    new Promise((resolve, reject) => {
+      snappy.uncompress(buffer, { asBuffer: true }, (err, out) =>
+        err ? reject(err) : resolve(out)
+      );
+    }),
+});
 
 const producer = kafka.producer();
 let isConnected = false;
