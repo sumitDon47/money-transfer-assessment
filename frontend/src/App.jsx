@@ -9,6 +9,7 @@ export default function App() {
   return loggedIn ? (
     <Dashboard onLogout={() => setLoggedIn(false)} />
   ) : (
-    <LoginOtp />
+    <LoginOtp onLogin={() => setLoggedIn(true)} />
+
   );
 }

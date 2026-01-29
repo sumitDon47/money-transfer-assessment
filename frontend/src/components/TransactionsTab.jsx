@@ -12,7 +12,11 @@ import {
   Divider,
 } from "@mui/material";
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
-import { createTransaction, listTransactions, updateTransactionStatus } from "../api/transactions";
+import {
+  createTransaction,
+  listTransactions,
+  updateTransactionStatus,
+} from "../api/transactions";
 import { listSenders } from "../api/senders";
 import { listReceivers } from "../api/receivers";
 
@@ -31,6 +35,8 @@ export default function TransactionsTab() {
     note: "",
   });
 
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
   const loadAll = async () => {
     setLoading(true);
     setMsg(null);
@@ -40,6 +46,7 @@ export default function TransactionsTab() {
         listReceivers({ page: 1, limit: 50 }),
         listTransactions({ page: 1, limit: 50 }),
       ]);
+
       setSenders(s?.data || []);
       setReceivers(r?.data || []);
       setTxs(t?.data || []);
@@ -60,21 +67,47 @@ export default function TransactionsTab() {
       return;
     }
 
+    const payload = {
+      senderId: Number(form.senderId),
+      receiverId: Number(form.receiverId),
+      amountJPY: Number(form.amountJPY),
+      note: form.note ? String(form.note) : null,
+    };
+
+    if (!Number.isFinite(payload.amountJPY) || payload.amountJPY <= 0) {
+      setMsg("amountJPY must be a number > 0");
+      return;
+    }
+
     setLoading(true);
     setMsg(null);
+
     try {
-      const payload = {
-        senderId: Number(form.senderId),
-        receiverId: Number(form.receiverId),
-        amountJPY: Number(form.amountJPY),
-        note: form.note ? String(form.note) : null,
-      };
       const created = await createTransaction(payload);
-      setMsg(created?.message ? `✅ ${created.message}` : "✅ Transaction created");
+
+      // Many Day-6 Kafka designs return 202 + { message: "Queued", ... }
+      // So we show message and refresh after a short delay.
+      const info =
+        created?.message ||
+        (created?.id ? `Created transaction #${created.id}` : "Transaction created");
+
+      setMsg(`✅ ${info}`);
       setForm({ senderId: "", receiverId: "", amountJPY: "", note: "" });
+
+      // If consumer inserts later, immediate GET might be empty.
+      await sleep(800);
+      await loadAll();
+      await sleep(800);
       await loadAll();
     } catch (e) {
-      setMsg(e?.response?.data?.message || e.message || "Create failed");
+      const serverMsg =
+        e?.response?.data?.message ||
+        (Array.isArray(e?.response?.data?.errors)
+          ? e.response.data.errors.map((x) => `${x.path}: ${x.message}`).join(" | ")
+          : null);
+
+      setMsg(serverMsg || e.message || "Create failed");
+      console.error("createTransaction failed:", e);
     } finally {
       setLoading(false);
     }
@@ -96,9 +129,20 @@ export default function TransactionsTab() {
 
   return (
     <Stack spacing={2}>
-      {msg ? <Alert severity="info" sx={{ borderRadius: 2 }}>{msg}</Alert> : null}
+      {msg ? (
+        <Alert severity="info" sx={{ borderRadius: 2 }}>
+          {msg}
+        </Alert>
+      ) : null}
 
-      <Paper sx={{ p: 2, borderRadius: 2, bgcolor: "rgba(255,255,255,0.05)", color: "white" }}>
+      <Paper
+        sx={{
+          p: 2,
+          borderRadius: 2,
+          bgcolor: "rgba(255,255,255,0.05)",
+          color: "white",
+        }}
+      >
         <Typography fontWeight={800} sx={{ mb: 1 }}>
           Create Transaction (amountJPY → NPR calc happens in backend)
         </Typography>
@@ -161,7 +205,14 @@ export default function TransactionsTab() {
         </Button>
       </Paper>
 
-      <Paper sx={{ p: 2, borderRadius: 2, bgcolor: "rgba(255,255,255,0.05)", color: "white" }}>
+      <Paper
+        sx={{
+          p: 2,
+          borderRadius: 2,
+          bgcolor: "rgba(255,255,255,0.05)",
+          color: "white",
+        }}
+      >
         <Stack direction="row" justifyContent="space-between" alignItems="center">
           <Typography fontWeight={800}>Transactions ({txs.length})</Typography>
           <Button
@@ -199,7 +250,8 @@ export default function TransactionsTab() {
               </Typography>
 
               <Typography variant="body2" sx={{ opacity: 0.8 }}>
-                JPY: {t.amountJPY ?? t.amount} • NPR: {t.amountNPR} • Fee NPR: {t.feeNPR} • Total NPR: {t.totalNPR} • Rate: {t.forexRate}
+                JPY: {t.amountJPY ?? t.amount} • NPR: {t.amountNPR} • Fee NPR: {t.feeNPR} •
+                Total NPR: {t.totalNPR} • Rate: {t.forexRate}
               </Typography>
 
               <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>

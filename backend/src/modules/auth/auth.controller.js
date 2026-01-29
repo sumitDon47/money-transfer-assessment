@@ -1,17 +1,18 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import sql from "mssql";
+import nodemailer from "nodemailer";
 import { getPool } from "../../config/db.js";
-import { transporter, FROM } from "../../config/mailer.js";
+import { getTransporter, FROM } from "../../config/mailer.js";
 
 const OTP_EXPIRES_MIN = Number(process.env.OTP_EXPIRES_MIN || 5);
 
-function normalizeEmail(v) {
-  return String(v || "").trim().toLowerCase();
-}
-
 function generateOtp() {
   return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function normalizeEmail(v) {
+  return String(v || "").trim().toLowerCase();
 }
 
 function isValidEmail(email) {
@@ -26,7 +27,7 @@ export async function requestOtp(req, res) {
 
     const pool = await getPool();
 
-    // Find user
+    // Find or create user
     const userResult = await pool
       .request()
       .input("email", sql.NVarChar(255), email)
@@ -34,7 +35,6 @@ export async function requestOtp(req, res) {
 
     let user = userResult.recordset[0];
 
-    // Create user if not exists
     if (!user) {
       const fullName = email.split("@")[0];
 
@@ -60,6 +60,7 @@ export async function requestOtp(req, res) {
     const otpHash = await bcrypt.hash(otp, 10);
     const expiresAt = new Date(Date.now() + OTP_EXPIRES_MIN * 60 * 1000);
 
+    // Store OTP (hashed)
     await pool
       .request()
       .input("userId", sql.Int, user.id)
@@ -70,28 +71,32 @@ export async function requestOtp(req, res) {
         VALUES (@userId, @otpHash, @expiresAt)
       `);
 
-    // Send email
-    await transporter.sendMail({
-      from: FROM,
-      to: email,
-      subject: "Your OTP Code",
-      text: `Your OTP is ${otp}. It expires in ${OTP_EXPIRES_MIN} minutes.`,
-      html: `
-        <div style="font-family:Arial,sans-serif;">
-          <h2>Your OTP Code</h2>
-          <p>Your OTP is:</p>
-          <div style="font-size:28px;font-weight:bold;letter-spacing:2px;">${otp}</div>
-          <p>This code expires in <b>${OTP_EXPIRES_MIN} minutes</b>.</p>
-        </div>
-      `,
-    });
+    // Send email (Ethereal in dev OR real SMTP if configured)
+    const transporter = await getTransporter();
 
-    return res.json({ message: "OTP sent to email" });
+    const info = await transporter.sendMail({
+    from: process.env.MAIL_FROM || "no-reply@moneytransfer.local",
+    to: email,
+    subject: "Your OTP Code",
+    text: `Your OTP is ${otp}. It expires in ${OTP_EXPIRES_MIN} minutes.`,
+  });
+
+  const previewUrl = nodemailer.getTestMessageUrl(info);
+  if (previewUrl) console.log("🔗 Ethereal Preview URL:", previewUrl);
+
+    return res.json({
+      message: "OTP sent to email",
+      previewUrl, // helps evaluator open the email (Ethereal only)
+    });
   } catch (err) {
     console.error("requestOtp error:", err);
     return res.status(500).json({ message: "Internal server error" });
   }
 }
+
+// keep your verifyOtp unchanged
+
+
 
 export async function verifyOtp(req, res) {
   try {

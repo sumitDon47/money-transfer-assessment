@@ -8,15 +8,37 @@ import authRoutes from "./modules/auth/auth.routes.js";
 
 import sendersRoutes from "./modules/senders/senders.routes.js";
 import receiversRoutes from "./modules/receivers/receivers.routes.js";
-
 import transactionsRoutes from "./modules/transactions/transactions.routes.js";
-
 
 export function createApp() {
   const app = express();
 
-  app.use(helmet());
-  app.use(cors());
+  const corsOptions = {
+    origin: (origin, cb) => {
+      // allow curl/postman (no Origin header)
+      if (!origin) return cb(null, true);
+
+      // allow localhost on any port (vite dev server changes ports)
+      const ok = /^http:\/\/localhost:\d+$/.test(origin) || /^http:\/\/127\.0\.0\.1:\d+$/.test(origin);
+      return cb(null, ok);
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    optionsSuccessStatus: 204,
+  };
+
+  app.use(helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
+  app.use(cors({
+  origin: ["http://localhost:5173", "http://localhost:5174"],
+  credentials: true,
+}));
+
+  // ✅ preflight handler (IMPORTANT)
+  app.options(/.*/, cors(corsOptions));
+
   app.use(express.json());
   app.use(morgan("dev"));
 
@@ -33,22 +55,19 @@ export function createApp() {
   });
 
   app.use("/auth", authRoutes);
+
   app.get("/me", requireAuth, (req, res) => {
-  res.json({ user: req.user });
+    res.json({ user: req.user });
   });
 
   app.use("/senders", sendersRoutes);
   app.use("/receivers", receiversRoutes);
   app.use("/transactions", transactionsRoutes);
 
-
-  // Global error handler (last middleware)
   app.use((err, req, res, next) => {
-  console.error("Unhandled error:", err);
-  return res.status(500).json({ message: "Internal server error" });
+    console.error("Unhandled error:", err);
+    return res.status(500).json({ message: "Internal server error" });
   });
-
-
 
   return app;
 }

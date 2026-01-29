@@ -26,7 +26,7 @@ CompressionCodecs[CompressionTypes.Snappy] = () => ({
 
 
 export async function startTransactionConsumer() {
-  const consumer = kafka.consumer({ groupId: "transactions-created-consumer" });
+  const consumer = kafka.consumer({ groupId: "transactions-created-consumer" + Date.now()});
 
   await consumer.connect();
   await consumer.subscribe({ topic: TOPIC_TRANSACTIONS_CREATED, fromBeginning: false });

@@ -1,4 +1,5 @@
 import React from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Box,
   Container,
@@ -21,7 +22,7 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim());
 }
 
-export default function LoginOtp() {
+export default function LoginOtp({ onLogin }) {
   const [step, setStep] = React.useState("EMAIL"); // EMAIL | OTP | DONE
   const [email, setEmail] = React.useState("");
   const [otp, setOtp] = React.useState("");
@@ -70,6 +71,8 @@ export default function LoginOtp() {
       localStorage.setItem("token", data.token);
       showMsg("success", "Login successful. Token saved.");
       setStep("DONE");
+      onLogin?.(); // ✅ this immediately switches App to Dashboard
+      navigate("/Dashboard");
     } catch (err) {
       const text =
         err?.response?.data?.message ||
