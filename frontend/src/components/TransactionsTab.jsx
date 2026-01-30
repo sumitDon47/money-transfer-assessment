@@ -12,11 +12,7 @@ import {
   Divider,
 } from "@mui/material";
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
-import {
-  createTransaction,
-  listTransactions,
-  updateTransactionStatus,
-} from "../api/transactions";
+import { createTransaction, listTransactions, updateTransactionStatus } from "../api/transactions";
 import { listSenders } from "../api/senders";
 import { listReceivers } from "../api/receivers";
 
@@ -28,6 +24,7 @@ export default function TransactionsTab() {
   const [receivers, setReceivers] = React.useState([]);
   const [txs, setTxs] = React.useState([]);
 
+  // keep IDs as STRING for MUI Select consistency
   const [form, setForm] = React.useState({
     senderId: "",
     receiverId: "",
@@ -35,21 +32,40 @@ export default function TransactionsTab() {
     note: "",
   });
 
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // filters (NO date filters)
+  const [filters, setFilters] = React.useState({
+    status: "",
+    senderId: "",
+    receiverId: "",
+  });
+
+  const loadRefs = async () => {
+    const [s, r] = await Promise.all([
+      listSenders({ page: 1, limit: 50 }),
+      listReceivers({ page: 1, limit: 50 }),
+    ]);
+    setSenders(s?.data || []);
+    setReceivers(r?.data || []);
+  };
+
+  const loadTxs = async () => {
+    const params = {
+      page: 1,
+      limit: 50,
+      status: filters.status || undefined,
+      senderId: filters.senderId ? Number(filters.senderId) : undefined,
+      receiverId: filters.receiverId ? Number(filters.receiverId) : undefined,
+    };
+    const t = await listTransactions(params);
+    setTxs(t?.data || []);
+  };
 
   const loadAll = async () => {
     setLoading(true);
     setMsg(null);
     try {
-      const [s, r, t] = await Promise.all([
-        listSenders({ page: 1, limit: 50 }),
-        listReceivers({ page: 1, limit: 50 }),
-        listTransactions({ page: 1, limit: 50 }),
-      ]);
-
-      setSenders(s?.data || []);
-      setReceivers(r?.data || []);
-      setTxs(t?.data || []);
+      await loadRefs();
+      await loadTxs();
     } catch (e) {
       setMsg(e?.response?.data?.message || e.message || "Failed to load");
     } finally {
@@ -59,7 +75,14 @@ export default function TransactionsTab() {
 
   React.useEffect(() => {
     loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  React.useEffect(() => {
+    // reload transactions when filters change
+    loadTxs().catch((e) => setMsg(e?.response?.data?.message || e.message || "Failed to load"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters.status, filters.senderId, filters.receiverId]);
 
   const onCreate = async () => {
     if (!form.senderId || !form.receiverId || !String(form.amountJPY).trim()) {
@@ -67,47 +90,31 @@ export default function TransactionsTab() {
       return;
     }
 
-    const payload = {
-      senderId: Number(form.senderId),
-      receiverId: Number(form.receiverId),
-      amountJPY: Number(form.amountJPY),
-      note: form.note ? String(form.note) : null,
-    };
-
-    if (!Number.isFinite(payload.amountJPY) || payload.amountJPY <= 0) {
-      setMsg("amountJPY must be a number > 0");
+    const jpy = Number(form.amountJPY);
+    if (!Number.isFinite(jpy) || jpy <= 0) {
+      setMsg("amountJPY must be a valid number > 0");
       return;
     }
 
     setLoading(true);
     setMsg(null);
-
     try {
+      const payload = {
+        senderId: Number(form.senderId),
+        receiverId: Number(form.receiverId),
+        amountJPY: jpy,
+        note: form.note ? String(form.note).trim() : null,
+      };
+
       const created = await createTransaction(payload);
+      setMsg(created?.message ? `✅ ${created.message}` : "✅ Transaction created/queued");
 
-      // Many Day-6 Kafka designs return 202 + { message: "Queued", ... }
-      // So we show message and refresh after a short delay.
-      const info =
-        created?.message ||
-        (created?.id ? `Created transaction #${created.id}` : "Transaction created");
-
-      setMsg(`✅ ${info}`);
       setForm({ senderId: "", receiverId: "", amountJPY: "", note: "" });
 
-      // If consumer inserts later, immediate GET might be empty.
-      await sleep(800);
-      await loadAll();
-      await sleep(800);
-      await loadAll();
+      // refresh list
+      await loadTxs();
     } catch (e) {
-      const serverMsg =
-        e?.response?.data?.message ||
-        (Array.isArray(e?.response?.data?.errors)
-          ? e.response.data.errors.map((x) => `${x.path}: ${x.message}`).join(" | ")
-          : null);
-
-      setMsg(serverMsg || e.message || "Create failed");
-      console.error("createTransaction failed:", e);
+      setMsg(e?.response?.data?.message || e.message || "Create failed");
     } finally {
       setLoading(false);
     }
@@ -119,7 +126,7 @@ export default function TransactionsTab() {
     try {
       await updateTransactionStatus(id, status);
       setMsg(`✅ Updated status to ${status}`);
-      await loadAll();
+      await loadTxs();
     } catch (e) {
       setMsg(e?.response?.data?.message || e.message || "Status update failed");
     } finally {
@@ -135,14 +142,8 @@ export default function TransactionsTab() {
         </Alert>
       ) : null}
 
-      <Paper
-        sx={{
-          p: 2,
-          borderRadius: 2,
-          bgcolor: "rgba(255,255,255,0.05)",
-          color: "white",
-        }}
-      >
+      {/* CREATE */}
+      <Paper sx={{ p: 2, borderRadius: 2, bgcolor: "rgba(255,255,255,0.05)", color: "white" }}>
         <Typography fontWeight={800} sx={{ mb: 1 }}>
           Create Transaction (amountJPY → NPR calc happens in backend)
         </Typography>
@@ -155,8 +156,9 @@ export default function TransactionsTab() {
             onChange={(e) => setForm((p) => ({ ...p, senderId: e.target.value }))}
             fullWidth
           >
+            <MenuItem value="">Select sender…</MenuItem>
             {senders.map((s) => (
-              <MenuItem key={s.id} value={s.id}>
+              <MenuItem key={s.id} value={String(s.id)}>
                 #{s.id} — {s.fullName} ({s.phone || "no phone"})
               </MenuItem>
             ))}
@@ -169,8 +171,9 @@ export default function TransactionsTab() {
             onChange={(e) => setForm((p) => ({ ...p, receiverId: e.target.value }))}
             fullWidth
           >
+            <MenuItem value="">Select receiver…</MenuItem>
             {receivers.map((r) => (
-              <MenuItem key={r.id} value={r.id}>
+              <MenuItem key={r.id} value={String(r.id)}>
                 #{r.id} — {r.fullName} ({r.phone || "no phone"})
               </MenuItem>
             ))}
@@ -205,23 +208,66 @@ export default function TransactionsTab() {
         </Button>
       </Paper>
 
-      <Paper
-        sx={{
-          p: 2,
-          borderRadius: 2,
-          bgcolor: "rgba(255,255,255,0.05)",
-          color: "white",
-        }}
-      >
-        <Stack direction="row" justifyContent="space-between" alignItems="center">
+      {/* LIST + FILTERS */}
+      <Paper sx={{ p: 2, borderRadius: 2, bgcolor: "rgba(255,255,255,0.05)", color: "white" }}>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="space-between" alignItems={{ sm: "center" }}>
           <Typography fontWeight={800}>Transactions ({txs.length})</Typography>
-          <Button
-            variant="outlined"
-            onClick={loadAll}
-            sx={{ borderColor: "rgba(255,255,255,0.35)", color: "white" }}
-          >
-            Refresh
-          </Button>
+
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ width: { xs: "100%", sm: "auto" } }}>
+            <TextField
+              select
+              size="small"
+              label="Status"
+              value={filters.status}
+              onChange={(e) => setFilters((p) => ({ ...p, status: e.target.value }))}
+              sx={{ minWidth: 160 }}
+            >
+              <MenuItem value="">All</MenuItem>
+              <MenuItem value="PENDING">PENDING</MenuItem>
+              <MenuItem value="SUCCESS">SUCCESS</MenuItem>
+              <MenuItem value="FAILED">FAILED</MenuItem>
+            </TextField>
+
+            <TextField
+              select
+              size="small"
+              label="Sender"
+              value={filters.senderId}
+              onChange={(e) => setFilters((p) => ({ ...p, senderId: e.target.value }))}
+              sx={{ minWidth: 180 }}
+            >
+              <MenuItem value="">All</MenuItem>
+              {senders.map((s) => (
+                <MenuItem key={s.id} value={String(s.id)}>
+                  #{s.id} — {s.fullName}
+                </MenuItem>
+              ))}
+            </TextField>
+
+            <TextField
+              select
+              size="small"
+              label="Receiver"
+              value={filters.receiverId}
+              onChange={(e) => setFilters((p) => ({ ...p, receiverId: e.target.value }))}
+              sx={{ minWidth: 180 }}
+            >
+              <MenuItem value="">All</MenuItem>
+              {receivers.map((r) => (
+                <MenuItem key={r.id} value={String(r.id)}>
+                  #{r.id} — {r.fullName}
+                </MenuItem>
+              ))}
+            </TextField>
+
+            <Button
+              variant="outlined"
+              onClick={loadAll}
+              sx={{ borderColor: "rgba(255,255,255,0.35)", color: "white" }}
+            >
+              Refresh
+            </Button>
+          </Stack>
         </Stack>
 
         <Divider sx={{ my: 1.5, borderColor: "rgba(255,255,255,0.14)" }} />
@@ -250,8 +296,8 @@ export default function TransactionsTab() {
               </Typography>
 
               <Typography variant="body2" sx={{ opacity: 0.8 }}>
-                JPY: {t.amountJPY ?? t.amount} • NPR: {t.amountNPR} • Fee NPR: {t.feeNPR} •
-                Total NPR: {t.totalNPR} • Rate: {t.forexRate}
+                JPY: {t.amountJPY ?? t.amount} • NPR: {t.amountNPR} • Fee NPR: {t.feeNPR} • Total NPR: {t.totalNPR} •
+                Rate: {t.forexRate}
               </Typography>
 
               <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
